@@ -1,0 +1,5 @@
+{
+ "name":"free-pdfepub-edge","private":true,"version":"0.1.0","type":"module",
+ "scripts":{"dev":"wrangler dev","deploy":"wrangler deploy","migrate":"wrangler d1 migrations apply pdfepub-db --remote"},
+ "devDependencies":{"wrangler":"^4.42.0"}
+}

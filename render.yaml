@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: pdfepub-compute
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    envVars:
+      - key: EDGE_URL
+        sync: false
+      - key: WORKER_SHARED_SECRET
+        sync: false
