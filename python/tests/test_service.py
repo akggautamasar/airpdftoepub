@@ -84,3 +84,10 @@ def test_chunk_download_reconstructs_and_checks_sha256(monkeypatch, tmp_path):
     service.download_input("12345678-1234-1234-1234-123456789abc", output, expected, chunks=2)
     assert output.read_bytes() == b"".join(chunks)
     assert calls == [0, 1]
+
+
+def test_large_pdf_has_bounded_extended_processing_budget():
+    assert service.max_wall_time_for_pdf(1_000_000) == 540
+    assert service.max_wall_time_for_pdf(18 * 1024 * 1024) == 540
+    assert service.max_wall_time_for_pdf(18 * 1024 * 1024 + 1) == 1800
+    assert service.max_wall_time_for_pdf(100_000_000) == 1800
