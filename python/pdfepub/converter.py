@@ -36,7 +36,7 @@ class Options:
     title: str | None = None
     author: str | None = None
     max_pages: int = 300
-    max_ocr_pages: int = 30
+    max_ocr_pages: int = 300
 
     @classmethod
     def from_dict(cls, obj: dict | None) -> 'Options':
@@ -51,7 +51,7 @@ class Options:
             raise ConversionError('Invalid OCR language list')
         return cls(preset=preset,ocr_languages=languages,
                    max_pages=int(os.environ.get('PDFEPUB_MAX_PAGES','300')),
-                   max_ocr_pages=int(os.environ.get('PDFEPUB_MAX_OCR_PAGES','30')),
+                   max_ocr_pages=int(os.environ.get('PDFEPUB_MAX_OCR_PAGES','300')),
                    title=str(data['title'])[:160] if data.get('title') else None,
                    author=str(data['author'])[:160] if data.get('author') else None)
 
