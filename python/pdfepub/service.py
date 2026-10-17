@@ -49,7 +49,52 @@ def control(path: str,payload: dict) -> dict:
         return r.json()
 
 
-def download_input(job_id: str, pdf: Path, expected: int):
+def download_input(job_id: str, pdf: Path, expected: int, chunks: int | None = None):
+    if chunks:
+        if chunks < 2 or chunks > 24 or expected > 100_000_000:
+            raise RuntimeError('Invalid segmented upload metadata')
+        import hashlib
+        endpoint = config('EDGE_URL').rstrip('/')
+        headers = {'Authorization': 'Bearer ' + config('WORKER_SHARED_SECRET')}
+        total = 0
+        with httpx.Client(timeout=90) as client, pdf.open('wb') as out:
+            for index in range(chunks):
+                expected_part_size = min(5 * 1024 * 1024, expected - index * 5 * 1024 * 1024)
+                if expected_part_size <= 0:
+                    raise RuntimeError('Bad chunk metadata')
+                for attempt in range(7):
+                    try:
+                        with client.stream('GET', f'{endpoint}/internal/files/chunk/{job_id}/{index}', headers=headers) as response:
+                            if response.status_code == 503 and attempt < 6:
+                                time.sleep(15)
+                                continue
+                            response.raise_for_status()
+                            digest_header = response.headers.get('X-Chunk-SHA256', '')
+                            if not re.fullmatch(r'[0-9a-f]{64}', digest_header):
+                                raise RuntimeError('Missing chunk checksum')
+                            digest = hashlib.sha256()
+                            count = 0
+                            for chunk in response.iter_bytes(chunk_size=65536):
+                                out.write(chunk)
+                                digest.update(chunk)
+                                count += len(chunk)
+                            if count != expected_part_size or digest.hexdigest() != digest_header:
+                                raise RuntimeError('Chunk integrity verification failed')
+                            total += count
+                            break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 503 and attempt < 6:
+                            time.sleep(15)
+                            continue
+                        raise
+                else:
+                    raise RuntimeError('Uploaded source part is unavailable')
+        if total != expected or pdf.stat().st_size != expected:
+            raise RuntimeError('Combined PDF length mismatch')
+        with pdf.open('rb') as source:
+            if source.read(5) != b'%PDF-':
+                raise RuntimeError('Combined upload lacks PDF signature')
+        return
     url=config('EDGE_URL').rstrip('/')+f'/internal/files/input/{job_id}'
     headers={'Authorization':'Bearer '+config('WORKER_SHARED_SECRET')}
     # Cloudflare KV can require >60s to propagate to another region.
@@ -101,7 +146,7 @@ def convert_one(job_id: str):
         with TemporaryDirectory(prefix='epub-task-') as directory:
             pdf=Path(directory)/'book.pdf'; epub=Path(directory)/'book.epub'
             log.info('Downloading source job %s',job_id)
-            download_input(job_id,pdf,claim['original_bytes'])
+            download_input(job_id,pdf,claim['original_bytes'],claim.get('input_chunks'))
             argv=[sys.executable,'-m','pdfepub.cli',str(pdf),str(epub),
                   '--options',json.dumps(claim['options']),'--progress']
             start=time.monotonic()

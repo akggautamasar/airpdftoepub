@@ -4,6 +4,121 @@
 const HOME_HTML = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>PDF to EPUB · Conversion API</title><style>\n:root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}*{box-sizing:border-box}body{margin:0;background:#080f1c;color:#e8f1ff;min-height:100vh}\nmain{max-width:800px;margin:auto;padding:55px 22px}h1{font-size:clamp(2rem,5vw,3.5rem);line-height:1.1;margin:14px 0}p{color:#9aadc9;line-height:1.65}\n.tag{color:#93c5fd;font-weight:700;letter-spacing:.1em;font-size:12px;text-transform:uppercase}.panel{background:#101c2f;border:1px solid #27364e;border-radius:18px;padding:24px;margin-top:28px}\nform{display:grid;gap:15px}label{font-size:13px;font-weight:650;color:#bed1ec;display:grid;gap:7px}input,select{background:#0a1324;border:1px solid #344866;color:#eaf3ff;padding:13px 12px;border-radius:9px;font:inherit;width:100%}input[type=file]{padding:10px}\n.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}button{padding:14px 22px;border:0;border-radius:9px;background:#69a4ff;color:#061426;font-weight:750;cursor:pointer;font-size:16px}button:disabled{opacity:.55;cursor:wait}\n#out{margin-top:18px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;color:#c7d8ec}a{color:#94c5ff}small{color:#95a6be}footer{margin-top:28px;font-size:13px;color:#99acca}.note{font-size:13px}\n@media(max-width:580px){.grid{grid-template-columns:1fr}main{padding-top:26px}}\n</style></head><body><main>\n<div class=\"tag\">Independent document processing API · v1</div>\n<h1>PDF → EPUB</h1><p>Turn suitable PDFs into reflowable EPUB books. English and Hindi OCR supported. This interface is a simple test client for the reusable API.</p>\n<div class=\"panel\"><form id=\"form\">\n<label>API key <input id=\"key\" type=\"password\" autocomplete=\"off\" required placeholder=\"Paste your private client API key\"><small>Used only in your requests to this service; not saved in browser storage.</small></label>\n<label>PDF file (up to 18 MiB) <input id=\"file\" type=\"file\" accept=\".pdf,application/pdf\" required></label>\n<div class=\"grid\">\n<label>Conversion preset<select id=\"preset\"><option value=\"balanced\">Balanced</option><option value=\"maximum_compression\">Maximum compression</option><option value=\"high_fidelity\">High fidelity</option></select></label>\n<label>OCR languages<select id=\"languages\"><option value=\"eng+hin\">English + Hindi</option><option value=\"eng\">English</option><option value=\"hin\">Hindi</option></select></label>\n</div><button type=\"submit\" id=\"go\">Convert PDF to EPUB</button></form>\n<div id=\"out\" role=\"status\" aria-live=\"polite\">Ready. Processing uses free-tier capacity and may take several minutes or time out.</div></div>\n<footer><a href=\"/health\">API health</a> · <a href=\"https://github.com/akggautamasar/airpdftoepub\" target=\"_blank\" rel=\"noopener noreferrer\">Source code &amp; API documentation</a><p class=\"note\">Private files expire after approximately 24 hours. Some documents cannot be converted accurately; check warnings in the report. No compression ratio is guaranteed.</p></footer>\n</main><script>\nconst form=document.getElementById('form'), out=document.getElementById('out'), go=document.getElementById('go');\nconst message=s=>{out.textContent=s};\nconst auth=()=>({'Authorization':'Bearer '+document.getElementById('key').value.trim()});\nasync function api(url,options={}){const r=await fetch(url,{...options,headers:{...auth(),...(options.headers||{})}});if(!r.ok){let data=await r.json().catch(()=>({}));throw new Error((data.error?.message||data.detail||'HTTP '+r.status)+' (HTTP '+r.status+')');}return r;}\nform.addEventListener('submit',async e=>{\ne.preventDefault();const file=document.getElementById('file').files[0];if(!file)return;\nif(file.size>18*1024*1024){message('This free service accepts at most 18 MiB per PDF.');return;}\ngo.disabled=true;let jobId=null;\ntry{\nmessage('Uploading PDF…');\nconst params=new URLSearchParams({preset:document.getElementById('preset').value,ocr_languages:document.getElementById('languages').value});\nconst submitted=await api('/v1/convert?'+params,{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});\nconst first=await submitted.json();jobId=first.job_id;\nif(!jobId)throw new Error('No job ID returned');\nmessage('Job '+jobId+' submitted. Waiting for the converter…');\nlet job=first;\nfor(let i=0;i<120;i++){\nif(i>0)await new Promise(resolve=>setTimeout(resolve,7000));\njob=await (await api('/v1/jobs/'+jobId)).json();\nmessage('Job: '+jobId+'\\nState: '+job.status+'\\nProgress: '+(job.progress_percent||0)+'%\\nAttempts: '+job.attempts);\nif(job.status==='completed'){\nconst report=await (await api('/v1/jobs/'+jobId+'/report')).json();\nconst res=await api('/v1/jobs/'+jobId+'/download');\nconst blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');\na.href=url;a.download=file.name.replace(/\\.pdf$/i,'')+'.epub';a.textContent='Download '+a.download;\nout.appendChild(document.createElement('br'));out.appendChild(a);\nmessage('Completed: '+jobId+'\\nOutput size: '+blob.size+' bytes\\nReduction: '+report.reduction_percent+'%\\nWarnings: '+(report.warnings||[]).join('; '));\nout.appendChild(document.createElement('br'));out.appendChild(a);return;\n}\nif(['failed','cancelled','expired'].includes(job.status))throw new Error(job.error?.message||'Job '+job.status);\n}\nmessage('Job '+jobId+' is still processing. Check its status later using your API key.');\n}catch(err){message('Conversion unavailable: '+err.message+(jobId?'\\nJob ID: '+jobId:''));}\nfinally{go.disabled=false;}\n});\n</script></body></html>";
 const MAX_UPLOAD = 18 * 1024 * 1024;
 const JOB_TTL = 24 * 60 * 60;
+const MAX_CHUNKED_UPLOAD = 100_000_000; // 100 decimal megabytes
+const CHUNK_BYTES = 5 * 1024 * 1024;
+const CHUNK_TICKET_TTL = 2 * 60 * 60;
+const MAX_CHUNKED_PENDING = 2;
+const MAX_ACTIVE_INPUT_BYTES = 700_000_000; // leave room in free 1 GB KV for EPUBs
+const uploadPartKey=(id,index)=>`input/${id}/part/${index}`;
+const chunkCount=bytes=>Math.ceil(bytes/CHUNK_BYTES);
+const partLength=(bytes,index)=>Math.min(CHUNK_BYTES, bytes-index*CHUNK_BYTES);
+async function uploadedToken(request,env) {
+ const origin=request.headers.get('Origin')||'';
+ if(!validUploadOrigin(origin))return {error:'An HTTPS browser origin is required'};
+ const match=(request.headers.get('Authorization')||'').match(/^Bearer\\s+(up_[a-f0-9]{64})$/i);
+ if(!match)return {error:'Upload capability missing'};
+ const hash=await sha256(match[1]);
+ const ticket=await env.DB.prepare('SELECT * FROM upload_tickets WHERE token_hash=?').bind(hash).first();
+ if(!ticket||ticket.origin!==origin||ticket.expires_at<=now()||ticket.state!=='ready')return {error:'Upload authorization is expired or used'};
+ if(ticket.file_bytes<=MAX_UPLOAD||ticket.file_bytes>MAX_CHUNKED_UPLOAD)return {error:'Not a chunked upload'};
+ return {ticket,hash,headers:directUploadCors(origin)};
+}
+async function postChunk(request,env,index) {
+ const auth=await uploadedToken(request,env);
+ if(auth.error)return errorWithHeaders('unauthorized',auth.error,403,validUploadOrigin(request.headers.get('Origin')||'')?directUploadCors(request.headers.get('Origin')):{});
+ const {ticket,headers}=auth;
+ const fail=(code,message,status)=>errorWithHeaders(code,message,status,headers);
+ const count=chunkCount(ticket.file_bytes);
+ if(!Number.isSafeInteger(index)||index<0||index>=count)return fail('part_out_of_range','Invalid chunk number',422);
+ const size=Number(request.headers.get('Content-Length')),expected=partLength(ticket.file_bytes,index);
+ if(size!==expected)return fail('part_size','Incorrect chunk size',413);
+ if((request.headers.get('Content-Type')||'').split(';')[0].toLowerCase()!=='application/octet-stream')return fail('media','Use raw chunk bytes',415);
+ const expectedDigest=(request.headers.get('X-Chunk-SHA256')||'').toLowerCase();
+ if(!/^[a-f0-9]{64}$/.test(expectedDigest))return fail('digest_required','SHA-256 checksum is required',422);
+ const key=uploadPartKey(ticket.job_id,index);
+ let data;
+ try{
+   data=new Uint8Array(await request.arrayBuffer());
+   if(data.byteLength!==expected)return fail('part_size','Chunk length mismatch',422);
+   if(index===0 && new TextDecoder().decode(data.subarray(0,5))!=='%PDF-')return fail('pdf_header','First chunk does not start with PDF signature',422);
+   const actualDigest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(b=>b.toString(16).padStart(2,'0')).join('');
+   if(actualDigest!==expectedDigest)return fail('digest_mismatch','Chunk checksum mismatch',422);
+ }catch{return fail('chunk_read','Unable to validate chunk',422);}
+ const previous=await env.DB.prepare('SELECT state,digest,bytes FROM upload_chunks WHERE job_id=? AND part=?')
+   .bind(ticket.job_id,index).first();
+ if(previous?.state==='ready') {
+   if(previous.digest===expectedDigest&&previous.bytes===expected)return response({ok:true,part:index,reused:true},200,headers);
+   return fail('part_conflict','Chunk already stored with different content',409);
+ }
+ const ts=now();
+ if(!previous){
+   const claim=await env.DB.prepare("INSERT OR IGNORE INTO upload_chunks (job_id,part,bytes,digest,state,updated_at) VALUES (?,?,?,?, 'writing',?)")
+     .bind(ticket.job_id,index,expected,expectedDigest,ts).run();
+   if(!claim.meta.changes)return fail('part_busy','Upload is already running',409);
+ }else{
+   const claim=await env.DB.prepare("UPDATE upload_chunks SET state='writing',digest=?,bytes=?,updated_at=? WHERE job_id=? AND part=? AND state!='ready' AND (state='failed' OR updated_at<?)")
+     .bind(expectedDigest,expected,ts,ticket.job_id,index,ts-120).run();
+   if(!claim.meta.changes)return fail('part_busy','Upload is already running; retry shortly',409);
+ }
+ try{
+   await env.FILES.put(key,data,{expirationTtl:JOB_TTL});
+   const update=await env.DB.prepare("UPDATE upload_chunks SET state='ready',updated_at=? WHERE job_id=? AND part=? AND state='writing' AND digest=?")
+     .bind(now(),ticket.job_id,index,expectedDigest).run();
+   if(!update.meta.changes)throw new Error('Upload lease lost');
+   return response({ok:true,part:index,total:count},201,headers);
+ }catch(e){
+   console.warn('Chunk write failure',ticket.job_id,index,String(e));
+   await env.DB.prepare("UPDATE upload_chunks SET state='failed',updated_at=? WHERE job_id=? AND part=? AND state='writing' AND digest=?")
+     .bind(now(),ticket.job_id,index,expectedDigest).run().catch(()=>{});
+   return fail('chunk_store','Chunk could not be stored, retry the same chunk',503);
+ }
+}
+async function chunkProgress(request,env) {
+ const auth=await uploadedToken(request,env);
+ if(auth.error)return errorWithHeaders('unauthorized',auth.error,403,validUploadOrigin(request.headers.get('Origin')||'')?directUploadCors(request.headers.get('Origin')):{});
+ const {ticket,headers}=auth;
+ const rows=await env.DB.prepare("SELECT part,bytes FROM upload_chunks WHERE job_id=? AND state='ready' ORDER BY part")
+  .bind(ticket.job_id).all();
+ return response({job_id:ticket.job_id,total:chunkCount(ticket.file_bytes),
+   uploaded:(rows.results||[]).map(x=>x.part),uploaded_bytes:(rows.results||[]).reduce((s,x)=>s+x.bytes,0)},200,headers);
+}
+async function finalizeChunks(request,env) {
+ const auth=await uploadedToken(request,env);
+ if(auth.error)return errorWithHeaders('unauthorized',auth.error,403,validUploadOrigin(request.headers.get('Origin')||'')?directUploadCors(request.headers.get('Origin')):{});
+ const {ticket,hash,headers}=auth;
+ const fail=(code,message,status)=>errorWithHeaders(code,message,status,headers);
+ const n=chunkCount(ticket.file_bytes);
+ const parts=await env.DB.prepare("SELECT part,bytes FROM upload_chunks WHERE job_id=? AND state='ready' ORDER BY part").bind(ticket.job_id).all();
+ if(parts.results.length!==n||parts.results.some((x,i)=>x.part!==i||x.bytes!==partLength(ticket.file_bytes,i)))
+   return fail('incomplete_upload','Upload is missing one or more chunks',409);
+ // Only one finalizer is allowed; a second request cannot reserve the same quota.
+ const consumed=await env.DB.prepare("UPDATE upload_tickets SET state='consumed' WHERE token_hash=? AND state='ready' AND expires_at>?")
+   .bind(hash,now()).run();
+ if(!consumed.meta.changes)return fail('ticket_used','Already finalized',409);
+ const day=new Date().toISOString().slice(0,10),ts=now();
+ const quota=await env.DB.prepare(`UPDATE clients SET usage_day=?,used_jobs=CASE WHEN usage_day=? THEN used_jobs+1 ELSE 1 END
+   WHERE id=? AND active=1 AND (usage_day<>? OR used_jobs<max_jobs_per_day)`)
+  .bind(day,day,ticket.client_id,day).run();
+ if(!quota.meta.changes)return fail('quota_exceeded','Conversion quota is exhausted',429);
+ const id=ticket.job_id;
+ try{
+   const saved=await env.DB.prepare(`INSERT INTO jobs
+     (id,client_id,idempotency_key,state,preset,languages,book_title,author,input_key,original_bytes,created_at,updated_at,expires_at)
+     VALUES (?,?,NULL,'queued',?,?,?,?,?,?,?,?,?)`)
+    .bind(id,ticket.client_id,ticket.preset,ticket.languages,ticket.book_title,ticket.author,'chunked/'+id,ticket.file_bytes,ts,ts,ts+JOB_TTL).run();
+   if(!saved.meta.changes)throw new Error('Job insert failed');
+   try{await env.JOBS_QUEUE.send({job_id:id});}
+   catch(e){console.warn('Queue will reconcile',id,String(e));}
+   return response(publicJob(await ownedJob(env,id,ticket.client_id)),202,headers);
+ }catch(e){
+   console.error('Chunk finalize failed',id,String(e));
+   await env.DB.prepare("UPDATE clients SET used_jobs=MAX(0,used_jobs-1) WHERE id=?").bind(ticket.client_id).run().catch(()=>{});
+   await env.DB.prepare("DELETE FROM jobs WHERE id=?").bind(id).run().catch(()=>{});
+   await env.DB.prepare("UPDATE upload_tickets SET state='ready' WHERE token_hash=? AND state='consumed'").bind(hash).run().catch(()=>{});
+   return fail('finalize_failed','Unable to register PDF for conversion',503);
+ }
+}
+
 const LEASE = 10 * 60;
 const MAX_ATTEMPTS = 3;
 const MAX_OUTPUT = 22 * 1024 * 1024;
@@ -90,8 +205,8 @@ async function issueUploadTicket(request,env,c,headerCors) {
     return errorWithHeaders('invalid_json','Invalid upload ticket JSON',400,headerCors);
   }
   const size=input?.file_bytes, origin=input?.origin;
-  if(!Number.isSafeInteger(size)||size<5||size>MAX_UPLOAD)
-    return errorWithHeaders('invalid_size','PDF must be 18 MiB or smaller',413,headerCors);
+  if(!Number.isSafeInteger(size)||size<5||size>MAX_CHUNKED_UPLOAD)
+    return errorWithHeaders('invalid_size','PDF must be 100 MB or smaller',413,headerCors);
   if(!validUploadOrigin(origin))
     return errorWithHeaders('invalid_origin','An HTTPS browser origin is required',422,headerCors);
   const preset=input.preset||'balanced';
@@ -101,6 +216,16 @@ async function issueUploadTicket(request,env,c,headerCors) {
   const title=typeof input.title==='string'?input.title.trim().slice(0,160):'';
   const author=typeof input.author==='string'?input.author.trim().slice(0,160):'';
   const ts=now();
+  if(size>MAX_UPLOAD){
+    const pendingLarge=await env.DB.prepare("SELECT COUNT(*) AS n FROM upload_tickets WHERE file_bytes>? AND state='ready' AND expires_at>?")
+      .bind(MAX_UPLOAD,ts).first();
+    if((pendingLarge?.n||0)>=MAX_CHUNKED_PENDING)
+      return errorWithHeaders('large_uploads_busy','Two large uploads are already reserved; retry later',429,headerCors);
+    const jobs=await env.DB.prepare("SELECT COALESCE(SUM(original_bytes),0) AS bytes FROM jobs WHERE expires_at>? AND state NOT IN ('expired','failed','cancelled')").bind(ts).first();
+    const queued=await env.DB.prepare("SELECT COALESCE(SUM(file_bytes),0) AS bytes FROM upload_tickets WHERE file_bytes>? AND state='ready' AND expires_at>?").bind(MAX_UPLOAD,ts).first();
+    if((jobs?.bytes||0)+(queued?.bytes||0)+size>MAX_ACTIVE_INPUT_BYTES)
+      return errorWithHeaders('storage_busy','Free storage capacity is busy. Retry after other jobs expire',429,headerCors);
+  }
   // Tickets without uploads are bounded and expire quickly. Quota charged only
   // after an actual accepted PDF upload.
   const pending=await env.DB.prepare(
@@ -114,11 +239,16 @@ async function issueUploadTicket(request,env,c,headerCors) {
   await env.DB.prepare(`INSERT INTO upload_tickets
     (token_hash,job_id,client_id,origin,file_bytes,preset,languages,book_title,author,state,created_at,expires_at)
     VALUES (?,?,?,?,?,?,?,?,?,'ready',?,?)`
-  ).bind(hash,id,c.id,origin,size,preset,languages,title,author,ts,ts+UPLOAD_TICKET_TTL).run();
+  ).bind(hash,id,c.id,origin,size,preset,languages,title,author,ts,ts+(size>MAX_UPLOAD?CHUNK_TICKET_TTL:UPLOAD_TICKET_TTL)).run();
+  const large=size>MAX_UPLOAD;
   return response({
     job_id:id,upload_token:token,
-    upload_url:new URL('/v1/direct-upload',request.url).href,
-    expires_at:iso(ts+UPLOAD_TICKET_TTL),max_upload_bytes:MAX_UPLOAD
+    upload_mode:large?'chunked':'single',
+    upload_url:new URL(large?'/v1/chunks':'/v1/direct-upload',request.url).href,
+    ...(large?{chunk_bytes:CHUNK_BYTES,chunk_count:chunkCount(size),
+      finalize_url:new URL('/v1/chunks/finalize',request.url).href}:{}),
+    expires_at:iso(ts+(large?CHUNK_TICKET_TTL:UPLOAD_TICKET_TTL)),
+    max_upload_bytes:MAX_CHUNKED_UPLOAD
   },201,{...headerCors,'Cache-Control':'no-store'});
 }
 async function directUpload(request,env) {
@@ -181,7 +311,7 @@ async function route(request,env) {
  const url=new URL(request.url),path=url.pathname,method=request.method;
  const headerCors=cors(request,env);
  if(method==='OPTIONS'){
-   if(path==='/v1/direct-upload'){
+   if(path==='/v1/direct-upload'||path==='/v1/chunks'||path==='/v1/chunks/finalize'){
      const origin=request.headers.get('Origin')||'';
      return validUploadOrigin(origin)
        ? new Response(null,{status:204,headers:directUploadCors(origin)})
@@ -198,6 +328,9 @@ async function route(request,env) {
    return await internalRoute(request,env,path,method);
  }
  if(path==='/v1/direct-upload' && method==='POST')return await directUpload(request,env);
+ if(path==='/v1/chunks'&&method==='POST')return await postChunk(request,env,Number(url.searchParams.get('part')));
+ if(path==='/v1/chunks'&&method==='GET')return await chunkProgress(request,env);
+ if(path==='/v1/chunks/finalize'&&method==='POST')return await finalizeChunks(request,env);
  if(!path.startsWith('/v1/'))return error('not_found','Endpoint not found',404);
  const c=await client(request,env);
  if(!c)return error('unauthorized','Valid API key required',401);
@@ -281,9 +414,25 @@ async function internalFileRoute(request,env,path,method){
  if(input && method==='GET'){
    const job=await env.DB.prepare('SELECT input_key,original_bytes,expires_at,state FROM jobs WHERE id=?').bind(input[1]).first();
    if(!job || job.expires_at<=now() || ['failed','cancelled','expired'].includes(job.state))return error('not_found','Job unavailable',404);
+   if(job.input_key.startsWith('chunked/'))return error('chunked_input','Use chunk endpoints for segmented source',422);
    const body=await env.FILES.get(job.input_key,'stream');
    if(!body)return error('temporarily_unavailable','KV input may still be propagating',503);
    return new Response(body,{headers:{'Content-Type':'application/pdf','Content-Length':String(job.original_bytes),'Cache-Control':'no-store'}});
+ }
+ const chunk=path.match(/^\/internal\/files\/chunk\/([a-f0-9-]{36})\/(\\d{1,2})$/);
+ if(chunk&&method==='GET'){
+   const id=chunk[1],index=Number(chunk[2]);
+   const job=await env.DB.prepare('SELECT input_key,original_bytes,expires_at,state FROM jobs WHERE id=?').bind(id).first();
+   if(!job||job.expires_at<=now()||['failed','cancelled','expired'].includes(job.state)||job.input_key!=='chunked/'+id)
+     return error('not_found','Chunked source is unavailable',404);
+   const n=chunkCount(job.original_bytes);
+   if(index<0||index>=n)return error('part','Invalid chunk number',422);
+   const record=await env.DB.prepare("SELECT bytes,digest FROM upload_chunks WHERE job_id=? AND part=? AND state='ready'").bind(id,index).first();
+   if(!record||record.bytes!==partLength(job.original_bytes,index))return error('missing_chunk','Uploaded chunk not recorded',503);
+   const stream=await env.FILES.get(uploadPartKey(id,index),'stream');
+   if(!stream)return error('temporarily_unavailable','Chunk still propagating',503);
+   return new Response(stream,{headers:{'Content-Type':'application/octet-stream','Content-Length':String(record.bytes),
+      'X-Chunk-SHA256':record.digest,'Cache-Control':'no-store'}});
  }
  const output=path.match(/^\/internal\/files\/output\/([a-f0-9-]{36})\/([a-f0-9-]{36})$/);
  if(output && method==='PUT'){
@@ -318,6 +467,7 @@ async function internalRoute(request,env,path,method){
    if(!changed.meta.changes)return error('claim_denied','Already claimed, finished, or invalid',409);
    const j=await env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(id).first();
    return response({job_id:id,lease_token:token,input_key:j.input_key,
+     ...(j.input_key.startsWith('chunked/')?{input_chunks:chunkCount(j.original_bytes),chunk_bytes:CHUNK_BYTES}:{}),
      output_key:`output/${id}/${token}.epub`,original_bytes:j.original_bytes,
      options:{preset:j.preset,ocr_languages:j.languages,title:j.book_title||null,author:j.author||null}});
  }
@@ -402,10 +552,23 @@ export default {
    const expired=await env.DB.prepare("SELECT id,input_key,output_key FROM jobs WHERE expires_at<? AND state!='expired' LIMIT 12").bind(ts).all();
    for(const j of expired.results){
       try{
-        await env.FILES.delete(j.input_key);
+        if(j.input_key.startsWith('chunked/')){
+          const uploaded=await env.DB.prepare('SELECT part FROM upload_chunks WHERE job_id=?').bind(j.id).all();
+          for(const p of uploaded.results)await env.FILES.delete(uploadPartKey(j.id,p.part));
+          await env.DB.prepare('DELETE FROM upload_chunks WHERE job_id=?').bind(j.id).run();
+          await env.DB.prepare('DELETE FROM upload_tickets WHERE job_id=?').bind(j.id).run();
+        }else await env.FILES.delete(j.input_key);
         if(j.output_key)await env.FILES.delete(j.output_key);
         await env.DB.prepare("UPDATE jobs SET state='expired',report_json=NULL,updated_at=? WHERE id=?").bind(ts,j.id).run();
       }catch(e){console.warn('Cleanup failed',j.id);}
+   }
+   // Abandoned, never-finalized uploads have no job; remove all their KV parts.
+   const stale=await env.DB.prepare("SELECT job_id FROM upload_tickets WHERE state='ready' AND expires_at<? LIMIT 8").bind(ts).all();
+   for(const t of stale.results){
+     const parts=await env.DB.prepare('SELECT part FROM upload_chunks WHERE job_id=?').bind(t.job_id).all();
+     for(const p of parts.results)await env.FILES.delete(uploadPartKey(t.job_id,p.part)).catch(()=>{});
+     await env.DB.prepare('DELETE FROM upload_chunks WHERE job_id=?').bind(t.job_id).run();
+     await env.DB.prepare('DELETE FROM upload_tickets WHERE job_id=?').bind(t.job_id).run();
    }
    // Retain expired metadata briefly for troubleshooting, then purge it.
    await env.DB.prepare("DELETE FROM jobs WHERE state='expired' AND expires_at<?").bind(ts-7*24*60*60).run();
