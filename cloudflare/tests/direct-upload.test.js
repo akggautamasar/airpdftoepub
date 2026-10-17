@@ -26,6 +26,12 @@ function mockEnvironment() {
             if(sql.includes('SELECT * FROM jobs WHERE id=? AND client_id=?'))return jobs.get(args[0])||null;
             throw Error('Unexpected first: '+sql);
           },
+          async all() {
+            if(sql.includes("SELECT part,bytes FROM upload_chunks")) {
+              return {results:[...parts.values()].filter(p=>p.state==='ready').map(p=>({part:p.part,bytes:p.bytes})).sort((a,b)=>a.part-b.part)};
+            }
+            return {results:[]};
+          },
           async run() {
             if(sql.includes('INSERT OR IGNORE INTO upload_chunks')) {
               const [id,index,bytes,digest,ts]=args;
