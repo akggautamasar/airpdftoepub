@@ -172,7 +172,7 @@ function directUploadCors(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Chunk-SHA256',
     'Access-Control-Max-Age': '600',
     'Vary': 'Origin',
     'Cache-Control': 'no-store',
