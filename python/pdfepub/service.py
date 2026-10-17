@@ -132,9 +132,13 @@ def upload_output(job_id: str, token: str, epub: Path):
         return r.json()
 
 
+def max_wall_time_for_pdf(original_bytes: int) -> int:
+    # A longer, bounded budget for bigger books on free-tier CPUs.
+    return 1800 if original_bytes > 18 * 1024 * 1024 else 540
+
 def child_limits():
     # Subprocess isolation, not a substitute for a hardened hostile-PDF sandbox.
-    resource.setrlimit(resource.RLIMIT_CPU,(520,530))
+    resource.setrlimit(resource.RLIMIT_CPU,(1750,1760))
     resource.setrlimit(resource.RLIMIT_FSIZE,(70*1024*1024,70*1024*1024))
     resource.setrlimit(resource.RLIMIT_NOFILE,(64,64))
 
@@ -151,6 +155,7 @@ def convert_one(job_id: str):
             argv=[sys.executable,'-m','pdfepub.cli',str(pdf),str(epub),
                   '--options',json.dumps(claim['options']),'--progress']
             start=time.monotonic()
+            max_wall_time=max_wall_time_for_pdf(claim['original_bytes'])
             progress=0
             # Unbuffered stdout; each line carries page progress or final report.
             process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
@@ -175,8 +180,8 @@ def convert_one(job_id: str):
             heartbeat_at=time.monotonic()
             try:
                 while True:
-                    if time.monotonic()-start>540:
-                        raise TimeoutError('Conversion exceeded 9 minute wall-time cap')
+                    if time.monotonic()-start>max_wall_time:
+                        raise TimeoutError(f'Conversion exceeded {max_wall_time // 60} minute wall-time cap')
                     try:
                         event,line=messages.get(timeout=3)
                     except queue.Empty:
