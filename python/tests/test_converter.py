@@ -31,6 +31,9 @@ def test_invalid_pdf(tmp_path):
     with pytest.raises(ConversionError):convert_pdf(f,tmp_path/'x.epub')
 
 def test_options():
+    # Larger scanned books must not fail after page 30. CPU/memory/deadlines
+    # remain independently bounded by the Render worker and MAX_PAGES=300.
+    assert Options.from_dict({'ocr_languages':'eng'}).max_ocr_pages == 300
     assert Options.from_dict({'preset':'high_fidelity'}).preset=='high_fidelity'
     with pytest.raises(ConversionError):Options.from_dict({'ocr_languages':'eng;rm -rf /'})
 
