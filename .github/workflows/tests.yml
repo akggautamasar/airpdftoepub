@@ -21,3 +21,4 @@ jobs:
         with:
           node-version: '22'
       - run: node --check cloudflare/src/index.js
+      - run: node --test cloudflare/tests/*.test.js

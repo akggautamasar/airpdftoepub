@@ -48,10 +48,145 @@ function internalAuth(req,env){
  const bearer=(req.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');
  return sameSecret(bearer,env.WORKER_SHARED_SECRET);
 }
+
+const UPLOAD_TICKET_TTL = 5 * 60;
+const UPLOAD_TICKET_PENDING = 5;
+function directUploadCors(origin) {
+  // No ambient cookies. Authorization is a short-lived, single-use token
+  // whose exact origin is checked against D1 before upload.
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Max-Age': '600',
+    'Vary': 'Origin',
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer'
+  };
+}
+function errorWithHeaders(code, message, status, headers) {
+  return response({error:{code,message}},status,headers);
+}
+function validPreset(value) {
+  return ['balanced','high_fidelity','maximum_compression'].includes(value);
+}
+function validLanguages(value) {
+  return ['eng','hin','eng+hin'].includes(value);
+}
+function validUploadOrigin(value) {
+  try {
+    const u = new URL(value);
+    return u.origin === value && u.protocol === 'https:' && !u.username && !u.password;
+  } catch { return false; }
+}
+async function issueUploadTicket(request,env,c,headerCors) {
+  if((request.headers.get('Content-Type')||'').split(';')[0]!=='application/json')
+    return errorWithHeaders('unsupported_media_type','Use application/json',415,headerCors);
+  const length=Number(request.headers.get('Content-Length'));
+  if(!Number.isSafeInteger(length) || length<2 || length>2048)
+    return errorWithHeaders('invalid_request_size','Ticket request must be at most 2048 bytes',413,headerCors);
+  let input;
+  try { input=await request.json(); } catch {
+    return errorWithHeaders('invalid_json','Invalid upload ticket JSON',400,headerCors);
+  }
+  const size=input?.file_bytes, origin=input?.origin;
+  if(!Number.isSafeInteger(size)||size<5||size>MAX_UPLOAD)
+    return errorWithHeaders('invalid_size','PDF must be 18 MiB or smaller',413,headerCors);
+  if(!validUploadOrigin(origin))
+    return errorWithHeaders('invalid_origin','An HTTPS browser origin is required',422,headerCors);
+  const preset=input.preset||'balanced';
+  const languages=input.ocr_languages||'eng+hin';
+  if(!validPreset(preset)||!validLanguages(languages))
+    return errorWithHeaders('invalid_options','Unsupported EPUB preset or OCR language',422,headerCors);
+  const title=typeof input.title==='string'?input.title.trim().slice(0,160):'';
+  const author=typeof input.author==='string'?input.author.trim().slice(0,160):'';
+  const ts=now();
+  // Tickets without uploads are bounded and expire quickly. Quota charged only
+  // after an actual accepted PDF upload.
+  const pending=await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM upload_tickets WHERE client_id=? AND state='ready' AND expires_at>?"
+  ).bind(c.id,ts).first();
+  if((pending?.n||0)>=UPLOAD_TICKET_PENDING)
+    return errorWithHeaders('too_many_tickets','Too many pending uploads; retry later',429,headerCors);
+  const bytes=crypto.getRandomValues(new Uint8Array(32));
+  const token='up_'+[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
+  const hash=await sha256(token),id=crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO upload_tickets
+    (token_hash,job_id,client_id,origin,file_bytes,preset,languages,book_title,author,state,created_at,expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?,'ready',?,?)`
+  ).bind(hash,id,c.id,origin,size,preset,languages,title,author,ts,ts+UPLOAD_TICKET_TTL).run();
+  return response({
+    job_id:id,upload_token:token,
+    upload_url:new URL('/v1/direct-upload',request.url).href,
+    expires_at:iso(ts+UPLOAD_TICKET_TTL),max_upload_bytes:MAX_UPLOAD
+  },201,{...headerCors,'Cache-Control':'no-store'});
+}
+async function directUpload(request,env) {
+  const origin=request.headers.get('Origin')||'';
+  const noCache={'Cache-Control':'no-store'};
+  const headers=validUploadOrigin(origin)?directUploadCors(origin):noCache;
+  const fail=(code,message,status)=>errorWithHeaders(code,message,status,headers);
+  if(!validUploadOrigin(origin))return fail('invalid_origin','HTTPS upload origin required',403);
+  const auth=(request.headers.get('Authorization')||'').match(/^Bearer\s+(up_[a-f0-9]{64})$/i);
+  if(!auth)return fail('unauthorized','A single-use upload token is required',401);
+  const tokenHash=await sha256(auth[1]);
+  const ticket=await env.DB.prepare('SELECT * FROM upload_tickets WHERE token_hash=?').bind(tokenHash).first();
+  if(!ticket||ticket.origin!==origin||ticket.state!=='ready'||ticket.expires_at<=now())
+    return fail('expired_ticket','Upload token is invalid, expired or already used',403);
+  const length=Number(request.headers.get('Content-Length'));
+  if(!Number.isSafeInteger(length)||length!==ticket.file_bytes||length<5||length>MAX_UPLOAD)
+    return fail('invalid_length','Upload length does not match the authorized file size',413);
+  if((request.headers.get('Content-Type')||'').split(';')[0].toLowerCase()!=='application/pdf')
+    return fail('invalid_media','Upload raw PDF bytes',415);
+  // Consume the capability before reading the body; concurrent replays lose.
+  const claimed=await env.DB.prepare(
+    "UPDATE upload_tickets SET state='consumed' WHERE token_hash=? AND state='ready' AND expires_at>?"
+  ).bind(tokenHash,now()).run();
+  if(!claimed.meta.changes)return fail('ticket_used','Upload token has already been consumed',409);
+  const day=new Date().toISOString().slice(0,10);
+  const reserved=await env.DB.prepare(`UPDATE clients
+    SET usage_day=?,used_jobs=CASE WHEN usage_day=? THEN used_jobs+1 ELSE 1 END
+    WHERE id=? AND active=1 AND (usage_day<>? OR used_jobs<max_jobs_per_day)`
+  ).bind(day,day,ticket.client_id,day).run();
+  if(!reserved.meta.changes)return fail('quota_exceeded','Daily conversion quota reached',429);
+  const id=ticket.job_id, inputKey=`input/${id}.pdf`,ts=now();
+  try {
+    const file=new Uint8Array(await request.arrayBuffer());
+    if(file.byteLength!==length||new TextDecoder().decode(file.subarray(0,5))!=='%PDF-')
+      return await directUploadRejected(env,ticket.client_id,id,inputKey,fail,'invalid_pdf','PDF signature or uploaded length is invalid',422);
+    await env.FILES.put(inputKey,file,{expirationTtl:JOB_TTL});
+    const saved=await env.DB.prepare(`INSERT INTO jobs
+      (id,client_id,idempotency_key,state,preset,languages,book_title,author,input_key,original_bytes,created_at,updated_at,expires_at)
+      VALUES (?,?,NULL,'queued',?,?,?,?,?,?,?,?,?)`
+    ).bind(id,ticket.client_id,ticket.preset,ticket.languages,ticket.book_title,ticket.author,inputKey,length,ts,ts,ts+JOB_TTL).run();
+    if(!saved.meta.changes)throw new Error('Failed to insert conversion job');
+    try {await env.JOBS_QUEUE.send({job_id:id});}
+    catch(e){console.error('Enqueue failed; reconciliation will retry',id,String(e));}
+    return response(publicJob(await ownedJob(env,id,ticket.client_id)),202,
+      {...headers,'Retry-After':'10'});
+  } catch(e) {
+    console.error('Direct upload failed',id,String(e));
+    return await directUploadRejected(env,ticket.client_id,id,inputKey,fail,
+      'upload_failed','Unable to store or queue PDF',503);
+  }
+}
+async function directUploadRejected(env,clientId,id,inputKey,fail,code,message,status) {
+  await env.FILES.delete(inputKey).catch(()=>{});
+  await env.DB.prepare('DELETE FROM jobs WHERE id=?').bind(id).run().catch(()=>{});
+  await env.DB.prepare('UPDATE clients SET used_jobs=MAX(0,used_jobs-1) WHERE id=?').bind(clientId).run().catch(()=>{});
+  return fail(code,message,status);
+}
+
 async function route(request,env) {
  const url=new URL(request.url),path=url.pathname,method=request.method;
  const headerCors=cors(request,env);
  if(method==='OPTIONS'){
+   if(path==='/v1/direct-upload'){
+     const origin=request.headers.get('Origin')||'';
+     return validUploadOrigin(origin)
+       ? new Response(null,{status:204,headers:directUploadCors(origin)})
+       : error('origin_not_allowed','HTTPS origin required',403);
+   }
    if(!headerCors['Access-Control-Allow-Origin'])return error('origin_not_allowed','Origin is not allowed',403);
    return new Response(null,{status:204,headers:headerCors});
  }
@@ -62,9 +197,11 @@ async function route(request,env) {
    if(path.startsWith('/internal/files/'))return await internalFileRoute(request,env,path,method);
    return await internalRoute(request,env,path,method);
  }
+ if(path==='/v1/direct-upload' && method==='POST')return await directUpload(request,env);
  if(!path.startsWith('/v1/'))return error('not_found','Endpoint not found',404);
  const c=await client(request,env);
  if(!c)return error('unauthorized','Valid API key required',401);
+ if(path==='/v1/upload-tickets' && method==='POST')return await issueUploadTicket(request,env,c,headerCors);
  if(path==='/v1/convert'&&method==='POST'){
    let size=Number(request.headers.get('Content-Length'));
    if(!Number.isSafeInteger(size)||size<=0)return error('length_required','Send a known Content-Length',411);
