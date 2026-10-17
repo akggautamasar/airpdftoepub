@@ -15,7 +15,7 @@ const partLength=(bytes,index)=>Math.min(CHUNK_BYTES, bytes-index*CHUNK_BYTES);
 async function uploadedToken(request,env) {
  const origin=request.headers.get('Origin')||'';
  if(!validUploadOrigin(origin))return {error:'An HTTPS browser origin is required'};
- const match=(request.headers.get('Authorization')||'').match(/^Bearer\\s+(up_[a-f0-9]{64})$/i);
+ const match=(request.headers.get('Authorization')||'').match(/^Bearer\s+(up_[a-f0-9]{64})$/i);
  if(!match)return {error:'Upload capability missing'};
  const hash=await sha256(match[1]);
  const ticket=await env.DB.prepare('SELECT * FROM upload_tickets WHERE token_hash=?').bind(hash).first();
@@ -419,7 +419,7 @@ async function internalFileRoute(request,env,path,method){
    if(!body)return error('temporarily_unavailable','KV input may still be propagating',503);
    return new Response(body,{headers:{'Content-Type':'application/pdf','Content-Length':String(job.original_bytes),'Cache-Control':'no-store'}});
  }
- const chunk=path.match(/^\/internal\/files\/chunk\/([a-f0-9-]{36})\/(\\d{1,2})$/);
+ const chunk=path.match(/^\/internal\/files\/chunk\/([a-f0-9-]{36})\/(\d{1,2})$/);
  if(chunk&&method==='GET'){
    const id=chunk[1],index=Number(chunk[2]);
    const job=await env.DB.prepare('SELECT input_key,original_bytes,expires_at,state FROM jobs WHERE id=?').bind(id).first();
