@@ -248,8 +248,8 @@ def convert_pdf(src: str | Path, dst: str | Path, options: Options | dict | None
     """Returns measured report. Caller should apply sandbox/process and upload caps."""
     opts=Options.from_dict(options) if not isinstance(options,Options) else options
     src=Path(src);dst=Path(dst)
-    if not src.is_file() or src.stat().st_size==0 or src.stat().st_size > 30*1024*1024:
-        raise ConversionError('PDF missing, empty, or exceeds 30 MiB')
+    if not src.is_file() or src.stat().st_size==0 or src.stat().st_size > 100_000_000:
+        raise ConversionError('PDF missing, empty, or exceeds 100 MB')
     with src.open('rb') as f:
         if f.read(5) != b'%PDF-': raise ConversionError('Not a PDF file')
     started=time.monotonic()

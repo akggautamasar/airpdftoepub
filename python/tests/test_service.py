@@ -15,7 +15,7 @@ def test_compute_worker_roundtrip(monkeypatch,tmp_path):
     data=inp.read_bytes()
     store={'input/test.pdf':data}
     calls=[]
-    def fake_download(job_id,out,expected):
+    def fake_download(job_id,out,expected,chunks=None):
         out.write_bytes(store['input/test.pdf'])
         assert out.stat().st_size==expected
     def fake_upload(job_id,token,epub):
