@@ -5,7 +5,7 @@
   "compatibility_date": "2026-09-01",
   "workers_dev": true,
   "vars": {
-    "RENDER_URL": "https://REPLACE_WITH_YOUR_RENDER_HOST.onrender.com",
+    "RENDER_URL": "https://pdfepub-compute.onrender.com",
     "ALLOWED_ORIGINS": ""
   },
   "d1_databases": [
