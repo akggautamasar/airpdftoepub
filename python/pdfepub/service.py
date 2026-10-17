@@ -21,6 +21,7 @@ import queue
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 log=logging.getLogger('pdfepub.worker')
@@ -194,6 +195,10 @@ def convert_one(job_id: str):
                 log.exception('Could not report job failure; lease recovery will handle it')
     finally:
         slot.release()
+
+@app.get('/', response_class=HTMLResponse, include_in_schema=False)
+def home():
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>PDF-to-EPUB Compute</title><style>body{font-family:system-ui,sans-serif;background:#0b1221;color:#e8f1ff;display:grid;place-items:center;min-height:100vh;margin:0;padding:1rem}main{max-width:570px;padding:2rem;background:#122039;border:1px solid #34405b;border-radius:16px}p{line-height:1.6;color:#b3c6e0}a{color:#91c3ff}</style></head><body><main><h1>PDF-to-EPUB conversion engine</h1><p>This is the internal compute service. Submit PDF conversions through the Cloudflare API, not directly to this server.</p><p><a href="https://pdfepub-edge.worksbeyondworks.workers.dev/">Open the PDF-to-EPUB API & test page</a></p><p><a href="/health">Check compute health</a> · <a href="https://github.com/akggautamasar/airpdftoepub">View source</a></p></main></body></html>"""
 
 @app.get('/health')
 def health():
